@@ -1,0 +1,936 @@
+---
+title: "downstream_analysis"
+author: "Adam Pelletier"
+date: "10/19/2020"
+output: html_document
+---
+
+```{r setup, message = FALSE, warning=FALSE}
+#### Load required packages for analysis
+## Some packages may require installation from Bioconductor : "https://bioconductor.org/install/" 
+suppressPackageStartupMessages(library(rstudioapi))
+suppressPackageStartupMessages(library(rmarkdown))
+suppressPackageStartupMessages(library(dplyr))
+suppressPackageStartupMessages(library(readxl))
+
+suppressPackageStartupMessages(library(ComplexHeatmap))
+suppressPackageStartupMessages(library(DESeq2))
+
+suppressPackageStartupMessages(library(biomaRt))
+suppressPackageStartupMessages(library(fgsea))
+
+suppressPackageStartupMessages(library(GSVA))
+suppressPackageStartupMessages(library(GSEABase))
+suppressPackageStartupMessages(library(cluster))
+suppressPackageStartupMessages(library(magrittr))
+suppressPackageStartupMessages(library(igraph))
+suppressPackageStartupMessages(library(tidyverse))
+
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(getwd())
+```
+
+
+``` {r dirSetup}
+setup_dir <- function(dir_string) { 
+  ### Verifies creates a directory if it doesn't exist. Returns the dir_path
+  if (dir.exists(dir_string)){
+    dir_set <- dir_string
+  } else {
+    dir.create(dir_string) 
+    dir_set <- dir_string
+  }
+  return(dir_set)
+}
+
+inputDir <- setup_dir("input")
+diagDir <- setup_dir("input/diagnostic_dir")
+countDir <- setup_dir("input/readCounts/")
+filenameDir <- setup_dir("input/filenameSchema")
+genesetsDir <- "~/Documents/GMT_files/"
+genesetsDir_msgidb <- "~/Documents/MSigDB/msigdb_v7.2_GMTs/"
+  
+                     
+                     
+
+outputDir <- setup_dir("output")
+figureDir <- setup_dir(file.path(outputDir,"figures"))
+dataOutDir <- setup_dir(file.path(outputDir,"data"))
+diagOutDir <- setup_dir(file.path(dataOutDir,"diagnostic_dir"))
+esetDir <- setup_dir("output/eset")
+GSVADir <- setup_dir(file.path(dataOutDir,"GSVA"))
+
+```
+
+
+
+### Ranked GSEA on shrunken Fold Change 
+```{r fgsea_shLFC, message = FALSE, echo=FALSE}
+## C2 and C5 were chosen to be the most potentially informative collections for the study at hand. 
+
+GSEA_data_Dir <- setup_dir(file.path(dataOutDir,"gsea"))
+
+geneset_list <- list(c5 = file.path(genesetsDir_msgidb,
+                                        "c5.go.bp.v7.2.symbols.gmt"),
+                     c2 = file.path(genesetsDir_msgidb,
+                                        "c2.all.v7.2.symbols.gmt"),
+                     c7 = file.path(genesetsDir_msgidb,
+                                        "c7.all.v7.2.symbols.gmt"),
+                     hallmark = file.path(genesetsDir_msgidb,
+                                        "h.all.v7.2.symbols.gmt"),
+                     c3 = file.path(genesetsDir_msgidb,
+                                        "c3.all.v7.2.symbols.gmt"),
+                     transfac = file.path(genesetsDir,
+                                        "TRANSFAC.gmt"),
+                     jasper = file.path(genesetsDir,
+                                        "JASPER-tf.gmt"),
+                     CHEA = file.path(genesetsDir,
+                                        "CHEA-tf.gmt"),
+                     HMDB = file.path(genesetsDir,
+                                        "HMDBpathways.gmt"),
+                     smpdb = file.path(genesetsDir,
+                                        "smpdb_clean.gmt"),
+                     interferome = file.path(genesetsDir,
+                                        "interferome.isg.gmt"))
+
+gmt_list <- sapply(names(geneset_list), simplify = F, USE.NAMES = T, function(x){
+   out <- getGmt(geneset_list[[x]])
+})
+analysis_genes <- unique(unlist(lapply(gmt_list, function(x){
+      out <- geneIds(x)
+})))
+
+
+
+
+
+fgsea_analysis <- list()
+
+for(i in names(topTables_contrasts)){
+  for(j in names(geneset_list)){
+    # print(contrast_list[[i]])
+    res_raw <- topTables_contrasts[[i]]$res_LFC %>%
+      as.data.frame() %>%
+    rownames_to_column("Name") %>%
+    filter(Name %in% analysis_genes) %>%
+    column_to_rownames("Name")
+    # res <- as.data.frame(res_raw) %>% 
+    #   rownames_to_column("ensembl_gene_id") %>%
+    #   inner_join(.,symbolConv,by=c("ensembl_gene_id"="ensembl_gene_id")) %>%
+    #   dplyr::select(-description) %>%
+    #   filter(!duplicated(hgnc_symbol)) %>%
+    #   column_to_rownames("hgnc_symbol")
+    minsize = 15
+    maxsize = 500
+    if(j %in% c("CHEA", "TRANSFAC", "JASPER")){
+      maxsize = 5000
+    } else if(j %in% c("smpdb","HMDB")){
+       minsize = 4
+    }
+      fgsea_analysis <- fgsea_output(fgsea_analysis,
+                                 eset_contrast = as.data.frame(res_raw),
+                                 outcome = i,
+                                 geneset_list = geneset_list,
+                                 geneset = j,
+                                 minSize = minsize,
+                                 maxSize = maxsize,
+                                 fileDir = GSEA_data_Dir,
+                                 method="shLFC")
+   
+    
+  }
+}
+
+consolidated_fgsea <- do.call("rbind", lapply(names(fgsea_analysis), function(x){
+  out <- do.call("rbind", lapply(names(fgsea_analysis[[x]]), function(y){
+      df <- fgsea_analysis[[x]][[y]]$output %>%
+              as.data.frame() %>%
+              mutate(contrast = x,
+                     genesetColl = y) %>%
+              unnest(cols = "leadingEdge") %>%
+              group_by(pathway) %>%
+              mutate(ledge = paste(leadingEdge, collapse = ", ")) %>%
+              ungroup() %>%
+              dplyr::select(-leadingEdge) %>%
+              unique() %>%
+              dplyr::rename(leadingEdge = "ledge")
+      return(df)
+  }))
+  return(out)
+}))
+
+
+
+
+
+test <- DEG_heatmap(eset_rld[full_genes$GeneID,], 
+                    heatmap_attributes = list(annotation_col = pData(eset_rld)[c("Culture", "Donor", "Cell_type")],
+                                              show_rownames = F) )
+```
+
+
+```{r gsea_export}
+
+
+lapply(names(fgsea_analysis), function(x){
+    
+    conditions <- str_split(x, pattern = "_vs_")[[1]]
+    conditions_split <- lapply(conditions, function(y){
+       splt <- str_split(y, pattern = "__")[[1]]
+       #splt2 <- str_split(splt[1], pattern = "_")[[1]]
+       return(list("cell" = splt[1], "Culture" = splt[2]))
+      
+    })
+    
+    if(conditions_split[[1]]$cell != conditions_split[[2]]$cell){
+      contrast_type <- "Cell_type_contrasts"
+    } else if(conditions_split[[1]]$Culture != conditions_split[[2]]$Culture){
+      contrast_type <- "Culture_contrasts"
+    }  
+    out <- sapply(names(fgsea_analysis[[x]]), USE.NAMES = T, simplify = F, function(y){
+          df <- fgsea_analysis[[x]][[y]]$output %>%
+                mutate(gsColl = y,
+                         condition = x) %>%
+                  mutate(Enriched_in = ifelse(NES > 0, conditions[1], conditions[2])) %>%
+                  tidyr::unnest(cols = leadingEdge) %>%
+                  group_by(pathway) %>%
+                  mutate(cLeadingEdge = paste(leadingEdge, collapse = ", ")) %>%
+                  ungroup() %>%
+                  dplyr::select(-leadingEdge) %>%
+                  unique() %>%
+                  dplyr::rename(leadingEdge = cLeadingEdge)
+        return(df)
+    })
+    filename <- paste("output/data/", contrast_type, "/GSEA_pathway_analysis/", x, "_GSEA.xlsx", sep = "")
+    print(filename)
+    writexl::write_xlsx(out, filename,format_headers = T)
+    top  <- topTables_contrasts[[x]]$res_LFC %>%
+            as.data.frame() %>%
+            rownames_to_column("HGNC_symbol") %>%
+            mutate(Enriched_in = ifelse(log2FoldChange > 0, conditions[1], conditions[2])) %>%
+            mutate(Enriched_in = ifelse(pvalue > 0.05, "--", Enriched_in)) %>%
+            arrange(desc(-log(pvalue)))
+    
+    filename <- paste("output/data/", contrast_type, "/differential_expression/", x,
+                      "_differential_expression.xlsx", sep = "")
+    writexl::write_xlsx(top, filename,format_headers = T)
+})
+
+
+
+```
+
+```{r gsva_func}
+
+gsva_func <- function(fgsea_table){
+    ledge <- enMap_spl_cd1d_upd %>% 
+            filter(module_newName == k) %>%
+            separate_rows(genes, sep = ", ") %>%
+            .$genes %>%
+              unique()
+    #return(ledge)
+    gs <- GeneSetCollection(GeneSet(setName = k, shortDescription = k, geneIds =ledge))
+    mat <- exprs(eset_cd1d_spl)
+    mat <- mat[intersect(ledge, row.names(eset_cd1d_spl)),]
+    #return(dim(mat))
+    slea <- as.data.frame(gsva(mat, gset.idx.list = gs, method = "zscore")) %>%
+          rownames_to_column("module") %>%
+          gather(SampleID, zscore, -module)
+  
+}
+    
+
+
+```
+
+
+
+```{r DNT_fresh}
+
+DNT_pathways_fresh <- consolidated_fgsea %>%
+                          filter(contrast %in% DNT_cont_fresh) %>%
+                          #filter(contrast != "DNT__Fresh_vs_gd__Fresh") %>%
+                          filter(pval < 0.05) %>%
+                          filter(padj < 0.25) %>%
+                          filter(NES > 0) %>%
+                          group_by(pathway, genesetColl) %>%
+                          mutate(n_contrast = n_distinct(contrast)) %>%
+                          ungroup() %>%
+                          filter(n_contrast == max(n_contrast)) 
+                          
+
+metabolism_filter <- c('OXPHOS', 'GLYCOLYSIS', 'WARBURG', 'OXIDATIVE' , 'BILE', 'METABOLISM', 
+                       'GLUCO', 'GLYCOGEN', 'INSULIN', 'KETO', 'LEPTIN', 'MEVALONATE', 'METHIONINE',
+                       'AMINO_ACID', 'NAD_', 'FATTY_ACID', 'METABOLIC',
+                       'TRIACYLGLYCERIDE','CATABOLISM', 'UREA', 'LIPOPROTEIN', 'PYRUVATE',
+                       'TCA_CYCLE' )
+
+cyto_chemo_filter <- c('IL[-|][0-9]+', 'INTERLEUKIN', 'TGF', 'TNF', 'INTERFERON', 'IFN', 
+                       'CYTOKINE','CHEMOKINE', 'CCR[0-9]+','CXCR[0-9]+', 'CX3CR[0-9]+', 'MIP1', 
+                        'FRACTALKINE', 'TUMOR_NECROSIS')
+
+DNT_fresh_TF <- DNT_pathways_fresh %>%
+                  filter(genesetColl %in% c("c3", 'CHEA', 'TRANSFAC', 'JASPER')) %>%
+                  filter(padj < 0.001)
+
+DNT_fresh_TF_consol <- consolidate_ledge(DNT_fresh_TF)
+DNT_fresh_TF_gsva <- gsva_func(DNT_fresh_TF_consol, 
+                               rld = eset_rld[,pData[pData$Culture == "Fresh",]$sample_name])
+              
+DNT_fresh_Metab <- DNT_pathways_fresh %>%
+                  filter(genesetColl %in% c("c2", 'c5', 'HALLMARK')) %>%
+                  filter(grepl(paste(metabolism_filter, collapse = "|"), pathway)) %>%
+                  bind_rows(DNT_pathways_fresh %>% filter(genesetColl %in% c('smpdb',
+                                                                             'HMDB')))
+DNT_fresh_Metab_consol <- consolidate_ledge(DNT_fresh_Metab)
+DNT_fresh_Metab_gsva <- gsva_func(DNT_fresh_Metab_consol, 
+                               rld = eset_rld[,pData[pData$Culture == "Fresh",]$sample_name])
+
+DNT_fresh_cytok_chemok <- DNT_pathways_fresh %>%
+                  filter(genesetColl %in% c("c2", 'c5', 'HALLMARK')) %>%
+                  filter(grepl(paste(cyto_chemo_filter, collapse = "|"), pathway)) 
+
+DNT_fresh_cytok_chemok_consol <- consolidate_ledge(DNT_fresh_cytok_chemok)
+DNT_fresh_cytok_chemok_gsva <- gsva_func(DNT_fresh_cytok_chemok_consol, 
+                               rld = eset_rld[,pData[pData$Culture == "Fresh",]$sample_name])
+
+
+
+
+
+
+DNT_pathways_fresh_tcrab <- consolidated_fgsea %>%
+                          filter(contrast %in% DNT_cont_fresh) %>%
+                          filter(contrast != "DNT__Fresh_vs_gd__Fresh") %>%
+                          filter(pval < 0.05) %>%
+                          filter(padj < 0.25) %>%
+                          filter(NES > 0) %>%
+                          group_by(pathway, genesetColl) %>%
+                          mutate(n_contrast = n_distinct(contrast)) %>%
+                          ungroup() %>%
+                          filter(n_contrast == max(n_contrast)) 
+
+DNT_fresh_TF_tcrab <- DNT_pathways_fresh_tcrab %>%
+                  filter(genesetColl %in% c("c3", 'CHEA', 'TRANSFAC', 'JASPER')) %>%
+                  filter(padj < 0.001)
+DNT_fresh_TF_consol_tcrab <- consolidate_ledge(DNT_fresh_TF_tcrab)
+DNT_fresh_TF_gsva_tcrab <- gsva_func(DNT_fresh_TF_consol_tcrab, 
+                               rld = eset_rld[,pData[pData$Culture == "Fresh" &
+                                                       pData$cell_type != "gd",]$sample_name])      
+gsva_heatmap(DNT_fresh_TF_gsva_tcrab,
+             heatmap_attributes = list(annotation_col = pData(eset_rld)[c("Culture", "Donor",
+                                                                          "Cell_type")],
+                                       show_colnames = F, treeheight_col = 7, 
+                                       treeheight_row = 7,
+                                          height = 10,
+                                       width = 14,
+                                       cellwidth  = 18, 
+                                       main = "Fresh subsets contrast TF pathways",
+                                       filename = file.path(figureDir, 'GSEA_results',
+                                             'Fresh subsets contrast TF pathways.pdf')))
+
+DNT_fresh_Metab_tcrab <- DNT_pathways_fresh_tcrab %>%
+                  filter(genesetColl %in% c("c2", 'c5', 'HALLMARK')) %>%
+                  filter(grepl(paste(metabolism_filter, collapse = "|"), pathway)) %>%
+                  bind_rows(DNT_pathways_fresh_tcrab %>% filter(genesetColl %in% c('smpdb',
+                                                                             'HMDB')))
+
+DNT_fresh_Metab_consol_tcrab <- consolidate_ledge(DNT_fresh_Metab_tcrab)
+DNT_fresh_Metab_gsva_tcrab <- gsva_func(DNT_fresh_Metab_consol_tcrab, 
+                               rld = eset_rld[,pData[pData$Culture == "Fresh" &
+                                                       pData$cell_type != "gd",]$sample_name])   
+
+gsva_heatmap(DNT_fresh_Metab_gsva_tcrab,
+             heatmap_attributes = list(annotation_col = pData(eset_rld)[c("Culture", "Donor",
+                                                                          "Cell_type")],
+                                       show_colnames = F, treeheight_col = 7, 
+                                       treeheight_row = 7,
+                                          height = 10,
+                                       width = 14,
+                                       cellwidth  = 18, 
+                                       main = "Fresh subsets contrast metab pathways",
+                                       filename = file.path(figureDir, 'GSEA_results',
+                                             'Fresh subsets contrast metab pathways.pdf')))
+
+
+DNT_fresh_cytok_chemok_tcrab <- DNT_pathways_fresh_tcrab %>%
+                  filter(genesetColl %in% c("c2", 'c5', 'HALLMARK')) %>%
+                  filter(grepl(paste(cyto_chemo_filter, collapse = "|"), pathway)) 
+
+DNT_fresh_cytok_chemok_consol_tcrab <- consolidate_ledge(DNT_fresh_cytok_chemok_tcrab)
+DNT_fresh_cytok_chemok_gsva_tcrab <- gsva_func(DNT_fresh_cytok_chemok_consol_tcrab, 
+                               rld = eset_rld[,pData[pData$Culture == "Fresh" &
+                                                       pData$cell_type != "gd",]$sample_name])
+
+gsva_heatmap(DNT_fresh_cytok_chemok_gsva_tcrab,
+             heatmap_attributes = list(annotation_col = pData(eset_rld)[c("Culture", "Donor",
+                                                                          "Cell_type")],
+                                       show_colnames = F, treeheight_col = 7, 
+                                       treeheight_row = 7,
+                                          height = 10,
+                                       width = 14,
+                                       cellwidth  = 18, 
+                                       main = "Fresh subsets contrast cytok pathways",
+                                       filename = file.path(figureDir, 'GSEA_results',
+                                             'Fresh subsets contrast cytok pathways.pdf')))
+
+```
+
+
+```{r DnT_fresh_vsculture}
+DNT_culture_effect <- consolidated_fgsea %>%
+                        filter(contrast == DNT_cross_culture) %>%
+                          filter(pval < 0.05) %>%
+                          filter(padj < 0.05) #%>%
+
+DNT_culture_effect_TF <- DNT_culture_effect %>%
+                  filter(genesetColl %in% c("c3", 'CHEA', 'TRANSFAC', 'JASPER')) %>%
+                  filter(padj < 0.001)
+
+DNT_culture_effect_TF_gsva<- gsva_func(DNT_culture_effect_TF, 
+                                rld = eset_rld[,pData[pData$cell_type == "DNT",]$sample_name])              
+gsva_heatmap(DNT_culture_effect_TF_gsva,
+             heatmap_attributes = list(annotation_col = pData(eset_rld)[c("Culture", "Donor",
+                                                                          "Cell_type")],
+                                       show_colnames = F, treeheight_col = 7, 
+                                       treeheight_row = 7,
+                                          height = 10,
+                                       width = 10,
+                                       cellwidth  = 12, 
+                                       main = "DNT Culture vs Fresh TF pathways",
+                                       filename = file.path(figureDir, 'GSEA_results',
+                                             'DNT Culture vs Fresh TF pathways.pdf')))
+
+
+DNT_culture_effect_metab <- DNT_culture_effect %>%
+                  filter(genesetColl %in% c("c2", 'c5', 'HALLMARK')) %>%
+                  filter(grepl(paste(metabolism_filter, collapse = "|"), pathway)) %>%
+                  bind_rows(DNT_culture_effect %>% filter(genesetColl %in% c('smpdb',
+                                                                             'HMDB'))) %>%
+                  top_n(n = 25, wt = abs(NES))
+
+#DNT_fresh_Metab_consol_tcrab <- consolidate_ledge(DNT_fresh_Metab_tcrab)
+DNT_culture_effect_metab_gsva <- gsva_func(DNT_culture_effect_metab, 
+                               rld = eset_rld[,pData[pData$cell_type == "DNT",]$sample_name])  
+
+gsva_heatmap(DNT_culture_effect_metab_gsva,
+             heatmap_attributes = list(annotation_col = pData(eset_rld)[c("Culture", "Donor",
+                                                                          "Cell_type")],
+                                       show_colnames = F, treeheight_col = 7, 
+                                       treeheight_row = 7,
+                                       height = 10,
+                                       width = 12,
+                                       main = "DNT Culture vs Fresh Metabolic pathways",
+                                       filename = file.path(figureDir, 'GSEA_results',
+                                                            'DNT_culture_effect_metab.pdf')))
+
+
+
+DNT_culture_effect_cytok_chemok <- DNT_culture_effect %>%
+                  filter(genesetColl %in% c("c2", 'c5', 'HALLMARK')) %>%
+                  filter(grepl(paste(cyto_chemo_filter, collapse = "|"), pathway)) 
+
+DNT_culture_effect_cytok_chemok_gsva <- gsva_func(DNT_culture_effect_cytok_chemok, 
+                               rld = eset_rld[,pData[pData$cell_type == "DNT",]$sample_name])   
+
+gsva_heatmap(DNT_culture_effect_cytok_chemok_gsva,
+             heatmap_attributes = list(annotation_col = pData(eset_rld)[c("Culture", "Donor",
+                                                                          "Cell_type")],
+                                       show_colnames = F, treeheight_col = 7, 
+                                       treeheight_row = 7,
+                                          height = 10,
+                                       width = 12,
+                                       main = "DNT Culture vs Fresh cytokine pathways",
+                                       filename = file.path(figureDir, 'GSEA_results',
+                                             'DNT Culture vs Fresh cytokine pathways.pdf')))
+
+
+```
+
+```{r NES_barplots}
+
+
+
+
+
+```
+
+
+
+
+```{r enMap_fresh}
+
+gsea_LS <- list.files("output/data/gsea", full.names = T)
+gsea_LS <- gsea_LS[!grepl("Culture", gsea_LS)]
+gsea_LS <- gsea_LS[grepl("DNT", gsea_LS)]
+gsea_LS <- gsea_LS[!grepl("jasper|c3|transfac|CHEA|interferome|HMDB|smpdb|custom", gsea_LS)]
+test <- read.csv(gsea_LS[2])
+
+fresh_gsea_table <- lapply(gsea_LS, function(x){
+  geneset <- gsub("_.*", "", gsub(".*Fresh_", "", x))
+  contrast <- gsub("!", "_", gsub("Fresh_.*", "Fresh", gsub("Fresh_vs", "Fresh!vs", x)))
+  print(x)
+  df <- read.csv(x ) %>%
+        mutate(geneset = geneset,
+               contrast = contrast) %>%
+        mutate(pathway = paste(pathway, contrast, geneset, sep = "!")) #%>%
+        #dplyr::select(-X)
+  return(df)
+}) %>%
+  dplyr::filter(padj < 0.05) %>%
+  dplyr::select(-1) 
+
+
+
+```
+
+
+```{r enrichment_map_functions}
+
+compute_modules_func_ledge <- function(fgsea_output, 
+                                       padj_threshold = 0.05,
+                                       jaccard_threshold = 0.5, 
+                                       filename,
+                                       p_integration_method = "maxp") {
+  
+  
+  pathDF <- as.data.frame(fgsea_output) %>% 
+          filter(padj < padj_threshold) 
+  #### enrichment map
+  # define nes (1 or -1)
+  nes = 1
+  nes_check <- FALSE
+  outGS_list <- c()
+  while(nes_check == FALSE){
+    if(nes == -1) {
+      leDF <- pathDF %>% dplyr::filter(NES < 0)
+    } else {
+      leDF <- pathDF %>% dplyr::filter(NES > 0)
+    }
+    
+    leLS <- sapply(leDF$pathway, simplify = F, USE.NAMES = T, function(x){
+          le <- leDF %>% filter(pathway == x) %>%
+            separate_rows(leadingEdge, sep = ", ") %>%
+            .$leadingEdge
+      return(le)
+    })
+    
+    # calculate Jaccard index
+      gsDist <- sapply(leLS, function(gs1) {
+        gsDist <- sapply(leLS, function(gs2) {
+                    gs1 <- gs1
+                    gs2 <- gs2
+                    jaccardIndex <- length(intersect(gs1, gs2))
+                    jaccardIndex <- jaccardIndex /
+                                    (length(gs1) + length(gs2) - jaccardIndex)
+        return(value = jaccardIndex)
+      })
+        return(value = gsDist)
+    })
+      
+    # filter based on jaccard threshold
+    gsMin <- gsDist
+    gsMin[gsMin < jaccard_threshold] <- 0
+    
+    # remove all singletons
+    flag <- rowSums(gsMin) > 1 | colSums(gsMin) > 1
+    gsFilt <- gsMin[flag, flag]
+
+    # create graph
+    g <- graph.adjacency(gsFilt,
+                         mode = "undirected",
+                         weighted = TRUE,
+                         diag = FALSE)
+    # decompose graph into modules and find most frequent genes of each module
+    gD <- decompose(g)
+
+     outNet <- lapply(1:length(gD), FUN = function(i) {
+      gsName <- V(gD[[i]])$"name"
+      geneFreq <- sort(table(unlist(leLS[gsName])))
+      
+      #geneFreq <- geneFreq[geneFreq >1]
+      if(length(gsName <= 4)) {
+        geneFreq <- geneFreq[geneFreq > 1/2 * length(gsName)]
+      } else {
+        geneFreq <- geneFreq[geneFreq > 1/4 * length(gsName)]
+      }
+      geneFreq <- geneFreq[order(geneFreq, decreasing = TRUE)]
+     
+      #return()
+      topGS <- gsName
+      #print(geneFreq)
+      
+      
+      df <- data.frame(gs = paste(topGS, collapse = ", "),
+               genes = paste(names(geneFreq), collapse = ", "),
+               freq  = paste(geneFreq, collapse = ", ")) #%>%
+      
+      return(df)
+      #return(topGS)
+    }) 
+    # outNet <- do.call(what = rbind, outNet)
+    outGS_list <- c(outGS_list,outNet)
+    if(nes == -1){
+      nes_check <- TRUE
+    }
+    nes <- -1
+    }
+
+      pval_int <- function(df, integ_method){
+        if(integ_method == "maxp"){
+          df %>% mutate(pval_int = max(pval))  %>%
+                mutate(logp = -log(pval_int) * sign(NES)) %>%
+                  mutate(NES_int = max(abs(NES)) * sign(NES))
+            
+        } else if( integ_method == "minp"){
+          df %>% mutate(pval_int = min(pval)) %>%
+                mutate(logp = -log(pval_int) * sign(NES)) %>%
+                  mutate(NES_int = min(abs(NES)) * sign(NES))
+        }
+      }
+    #   outGS_list <- c(outGS_list,gsDist)
+    #if(nes == -1){
+      #outNet <- outGS_list
+      out <- do.call(what = rbind, outGS_list) %>%
+                rowid_to_column("rowid") %>%
+                mutate(module = paste("MODULE", rowid, sep = "_")) %>%
+                mutate(module_newName = "") %>%
+                dplyr::select(module_newName, module, gs, genes) %>%
+          
+                mutate(gsSplit = gs) %>%
+                separate_rows(gsSplit, sep = ", ") %>%
+                inner_join(., pathDF %>% dplyr::select(pathway, NES, pval), 
+                           by = c("gsSplit" = "pathway")) %>%
+                group_by(module) %>%
+                pval_int(., integ_method = p_integration_method) %>%
+                # mutate(NES_int = ifelse(pval == pval_int, NES, NA )) %>%
+                # filter(!is.na(NES_int)) %>%
+                unique() %>%
+                dplyr::select(module_newName, module, gs, genes, pval_int, logp, NES_int) %>%
+                dplyr::rename(NES = 'NES_int') %>%
+
+                unique() %>%
+                ungroup()
+    
+
+  return(out)
+}
+
+
+substitute_modules <- function(fgsea_table, module_table){
+  module_delete <- module_table %>%
+                    separate_rows(gs, sep = ", ") 
+  module_annex <- module_table %>%
+                    mutate(module = ifelse(module_newName != "", module_newName, module)) %>%
+                    rename(pathway = "module",
+                           pval = "pval_int",
+                           leadingEdge = "genes") %>%
+                    dplyr::select(pathway, pval, logp, NES, leadingEdge)
+  df <- fgsea_table %>%
+          ungroup(.) %>%
+          filter(!pathway %in% module_delete$gs) %>%
+          mutate(logp = -log(pval) * sign(NES)) %>%
+          dplyr::select(pathway, pval, logp, NES, leadingEdge) %>%
+          bind_rows(module_annex) %>%
+          arrange(desc(abs(logp)))
+  return(df)
+}
+
+
+
+
+```
+
+
+```{r enMap_DNT_fresh}
+
+
+DNT_pathways_fresh_enMap_prep <- consolidated_fgsea %>%
+                                        filter(contrast %in% DNT_cont_fresh) %>%
+                                      dplyr::filter(!genesetColl %in% c("jasper","c3","transfac","CHEA","interferome","HMDB","smpdb","custom")) %>%
+                                      mutate(pathway = paste(pathway, contrast, genesetColl, sep = "!")) %>%
+                                      filter(pval < 0.05) %>%
+                                      filter(padj < 0.25) #%>%
+                                      # mutate(dir = sign(NES)) %>%
+                                      # group_by(pathway, dir) %>%
+                                      # 
+                                      # filter(NES > 0)
+
+enMap_DNT_fresh <- compute_modules_func_ledge(DNT_pathways_fresh_enMap_prep, jaccard_threshold = 0.5)
+
+writexl::write_xlsx(enMap_DNT_fresh, path = "output/data/enrichmentMap_DNT_fresh.xlsx")
+
+```
+
+```{r enMap_read}
+#enMap_DNT_pathways_fresh_annot <- readxl::read_excel("output/data/enrichmentMap_DNT_fresh-FL_annot_FL.xlsx", sheet = "Cleaned version") %>%
+enMap_DNT_pathways_fresh_annot <- readxl::read_excel("output/data/enrichmentMap_DNT_fresh_annot_16_11_2023.xlsx", sheet = "Cleaned version") %>%
+                                  dplyr::filter(module_annotation != "") #%>%
+                                  
+
+DNT_enmap_gsc <- GeneSetCollection(lapply(unique(enMap_DNT_pathways_fresh_annot$module_annotation), function(x){
+  ledge <- enMap_DNT_pathways_fresh_annot %>%
+            dplyr::filter(module_annotation == x) %>%
+            separate_rows(genes, sep = ", ") %>%
+            dplyr::select(module_annotation, genes) %>%
+            unique() %>%
+            .$genes
+  gs <- GeneSet(setName = x, shortDescription = x, geneIds =ledge)
+  return(gs)
+}))
+
+
+gsva_dnt_modules_fresh <- gsva(eset_fresh_corr, gset.idx.list = DNT_enmap_gsc, method = "zscore")
+
+hclust_mod <- hclust(dist(t(scale(t(exprs(gsva_dnt_modules_fresh))))), method = "ward.D2")
+
+module_hm <-  DEG_heatmap(gsva_dnt_modules_fresh, 
+                          colors = RColorBrewer::brewer.pal(n = 11, name = "PuOr"),
+                    heatmap_attributes = list(annotation_col = pData(eset_fresh_corr)[c("Cell_type")],
+                                              show_rownames = T,
+                                              show_colnames = F,
+                                             # cluster_cols = rev(as.dendrogram(hclust_mod)),
+                                              clustering_method = "ward.D2",
+                                              cutree_cols = 2,
+                                              cutree_rows = 3,
+                                              fontsize = 5,
+                                              cellheight = 7,
+                                              annotation_colors = annotation_colors["Cell_type"],
+                                              main = "fresh human_subsets_module_expression",
+                                              name = "Z-Score") )
+
+module_hm_uncut <-  DEG_heatmap(gsva_dnt_modules_fresh, 
+                    heatmap_attributes = list(annotation_col = pData(eset_fresh_corr)[c("Cell_type")],
+                                              show_rownames = T,
+                                              show_colnames = F,
+                                              clustering_method = "ward.D2",
+                                              cutree_cols = 2,
+                                              #cutree_rows = 3,
+                                              fontsize = 5,
+                                              cellheight = 7,
+                                              annotation_colors = annotation_colors["Cell_type"],
+                                              main = "fresh human_subsets_module_expression",
+                                              name = "Z-Score") )
+
+pdf("output/figures/DNT_fresh_module_heatmap.pdf", height =8, width = 5)
+module_hm
+dev.off()
+  
+toGmt(DNT_enmap_gsc, "output/data/enMap_DNT_fresh.gmt")
+
+
+hm_row_order <- row.names(gsva_dnt_modules_fresh)[row_order(module_hm_uncut)]
+fgsea_analysis_modules <- do.call("rbind", lapply(DNT_cont_fresh, function(x){
+#fgsea_analysis_modules <- sapply(DNT_cont_fresh, simplify = F, USE.NAMES = T, function(x){
+    out <- do.call("rbind",lapply(unique(enMap_DNT_pathways_fresh_annot$module_annotation),function(y){
+          df <- enMap_DNT_pathways_fresh_annot %>%
+                dplyr::filter(module_annotation == y) %>%
+                dplyr::select(module_annotation, gs, module) %>%
+                separate_rows(gs, sep = ", ") %>%
+                dplyr::filter(grepl(x, gs)) %>%
+                left_join(consolidated_fgsea %>%
+                            mutate(gs = paste(pathway, contrast, genesetColl, sep = "!")), by = "gs") 
+                #separate(gs, into = c("pathway", "contrast", "genesetColl"), sep = "!") #%>%
+                #left_join(consolidated_fgsea, by = c("pathway" = "pathway", "contrast" = "contrast", "genesetColl" = "genesetColl")) 
+    })) %>%
+      mutate(dir = sign(NES)) %>%
+      group_by(module_annotation, dir) %>%
+      summarise(max_nes = ifelse(dir == 1, max(NES), min(NES)),
+                minp = min(pval)) %>%
+      ungroup() %>%
+      unique() %>%
+      dplyr::select(-dir) %>%
+      dplyr::rename(NES = "max_nes",
+                    pvalue = "minp",
+                    module = "module_annotation") %>%
+      mutate(logp = -log10(pvalue) * sign(NES)) %>%
+      mutate(contrast = x) %>%
+      mutate(contrast = gsub("__Fresh", "", contrast)) %>%
+      mutate(contrast = gsub("_", " ", contrast))
+      # 
+})) %>%
+  mutate(module = factor(module, levels = rev(hm_row_order)))
+
+#})
+
+
+
+journal_font <- "Helvetica"
+modules_dotplot <- ggplot(fgsea_analysis_modules, aes(y= module, x= NES, label="-log10(p')"))  +
+           geom_point(aes(color = logp), size = 1) +
+           labs(y="Pathway", x= "NES (Normalized Enrichment Score)") +
+           theme_bw() + 
+           xlim(0, ceiling(max(fgsea_analysis_modules$NES))) +
+           theme(axis.title = element_text(family = journal_font, face="bold", size=10)) +
+           theme(axis.text = element_text(family = journal_font, face="bold", size=7)) +
+          #scale_fill_manual(values = colorpalette, limits=names(colorpalette)) +
+          geom_vline(xintercept = 0, linetype = "dashed", color = "black") +
+          facet_wrap(~contrast)
+           #coord_flip()
+pdf("output/figures/DNT_fresh_modules_dotplot.pdf", height = 10)
+modules_dotplot
+dev.off()
+
+  
+
+```
+
+
+```{r exhaustion_markers}
+exh_markers <- c("TOX", "LAG3", "BTLA", "PDCD1", "HAVCR2", "TIGIT", "CTLA4", "TCF7", "CD244", "CD160", "KLRG1", "FAS", "CD69", "CD44", "SELL", "B3GAT1")
+
+exh_DEG <- DEG_heatmap(eset_fresh_corr[exh_markers,], 
+                       colors = c("darkblue", "blue", "white", "red", "darkred"),
+                    heatmap_attributes = list(annotation_col = pData(eset_fresh_corr)[c("Cell_type")],
+                                              show_rownames = T,
+                                              show_colnames = F,
+                                              clustering_method = "ward.D2",
+                                              cutree_cols = 4,
+                                              cutree_rows =  4,
+                                              cellheight = 10, 
+                                              fontsize = 8,
+                                              annotation_colors = annotation_colors["Cell_type"],
+                                              main = "exhaustion_markers human_subsets_DEG",
+                                              name = "Z-Score") )
+pdf(file.path(figureDir, "fresh human_subsets_exhaustion_activation_markers.pdf"))
+exh_DEG
+dev.off()
+
+```
+
+
+```{r cytok_receptor_hm}
+gcR_markers <- c("IL2RA", "IL2RB", "IL2RG", "IL7R", "IL15RA", "IL4R")
+
+gcR_DEG <- DEG_heatmap(eset_rld_corr[gcR_markers,], 
+                       colors = c("darkblue", "blue", "white", "red", "darkred"),
+                    heatmap_attributes = list(annotation_col = pData(eset_rld_corr)[c("Cell_type", "Culture")],
+                                              show_rownames = T,
+                                              show_colnames = F,
+                                              clustering_method = "ward.D2",
+                                              cutree_cols = 2,
+                                              #cutree_rows =  2,
+                                              cellheight = 10,
+                                              cellwidth = 15,
+                                              fontsize = 8,
+                                              annotation_colors = annotation_colors,
+                                              main = "gammaC_receptor_chains_human_subsets_DEG",
+                                              name = "Z-Score") )
+pdf(file.path(figureDir, "human_subsets_gammaC__chains.pdf"), width = 10)
+gcR_DEG
+dev.off()
+
+
+## Felix asked for a custom heatmap (on dec 11 2023) 
+func_markers <- c("FOXP3", "EOMES", "GZMB", "TGFB1")
+
+func_DEG <- DEG_heatmap(eset_rld_corr[func_markers,fresh_samples], 
+                       colors = c("darkblue", "blue", "white", "red", "darkred"),
+                    heatmap_attributes = list(annotation_col = pData(eset_rld_corr[,fresh_samples])[c("Cell_type")],
+                                              show_rownames = T,
+                                              show_colnames = F,
+                                              clustering_method = "ward.D2",
+                                              #clustering_distance_cols = "correlation",
+                                              #cutree_cols = 2,
+                                              #cutree_rows =  2,
+                                              cellheight = 10,
+                                              cellwidth = 15,
+                                              fontsize = 8,
+                                              annotation_colors = annotation_colors,
+                                              main = "functional_markers_human_subsets_DEG",
+                                              name = "Z-Score") )
+pdf(file.path(figureDir, "human_subsets_functional_markers.pdf"), width = 10)
+func_DEG
+dev.off()
+
+func_markers <- c("FOXP3", "EOMES", "GZMB", "TGFB1", "IL17A")
+
+func_DEG <- DEG_heatmap(eset_rld_corr[func_markers,fresh_samples], 
+                       colors = c("darkblue", "blue", "white", "red", "darkred"),
+                    heatmap_attributes = list(annotation_col = pData(eset_rld_corr[,fresh_samples])[c("Cell_type")],
+                                              show_rownames = T,
+                                              show_colnames = F,
+                                              clustering_method = "ward.D2",
+                                              #clustering_distance_cols = "correlation",
+                                              #cutree_cols = 2,
+                                              #cutree_rows =  2,
+                                              cellheight = 10,
+                                              cellwidth = 15,
+                                              fontsize = 8,
+                                              annotation_colors = annotation_colors,
+                                              main = "functional_markers_human_subsets_DEG",
+                                              name = "Z-Score") )
+pdf(file.path(figureDir, "human_subsets_functional_markers_w_il17.pdf"), width = 10)
+func_DEG
+dev.off()
+
+
+
+```
+
+
+```{r dnt_vs_Rest}
+
+dnt_vs_rest_DEGS <- do.call("rbind", lapply(names(topTables_contrasts)[!grepl("Culture.*Fresh", names(topTables_contrasts)) & grepl("DNT", names(topTables_contrasts))], function(x){
+      df <- as.data.frame(topTables_contrasts[[x]]$res_LFC) %>%
+              dplyr::filter(padj < 0.05) %>%
+              mutate(dir = sign(log2FoldChange)) %>%
+              mutate(contrast = x) %>%
+              mutate(contrastType = ifelse(grepl("Fresh", contrast), "Fresh", "Culture")) %>%
+              rownames_to_column("gene")
+})) %>%
+  #group_by(contrastType, gene) %>%
+  mutate(total_n = 3) %>%
+  group_by(contrastType, gene, dir) %>%
+  mutate(n_contrasts = n_distinct(contrast)) %>%
+  ungroup() %>%
+  dplyr::filter(n_contrasts == total_n) %>%
+  split(., f = .$contrastType)
+  
+
+DNT_sel_markers <- c("BCL2L11", "BLK", "C1R", "CD226", "CD70", "CDC20", "CDK5", "E2F7", "E2F8", "ELF2", "FOXM1", "FOXO3B", "HAVCR1", "HAVCR2", "HLA-DMA", "HLA-DRA", "IBTK", "IFNAR2", "IFNLR1", "IL10", "IL19", "IL26",
+                     "IRF7", "MYB", "MYBL2", "POU2AF1", "RAD51", "SCART1", "TIGIT", "TIMD4", "TNFSF15", "TP53I3", "USP24", "WNT3", "ZBTB32", "ZXDC")
+ha = rowAnnotation(foo = anno_mark(at = which(unique(dnt_vs_rest_DEGS$Fresh$gene) %in% DNT_sel_markers), 
+                                            labels = unique(dnt_vs_rest_DEGS$Fresh$gene)[unique(dnt_vs_rest_DEGS$Fresh$gene) %in% DNT_sel_markers]),
+                   gp = gpar(fontsize = 2))
+
+
+dnt_vs_rest_fresh_hm <- DEG_heatmap(eset_fresh_corr[unique(dnt_vs_rest_DEGS$Fresh$gene),], 
+                       colors = c("darkblue", "blue", "white", "red", "darkred"),
+                    heatmap_attributes = list(annotation_col = pData(eset_fresh_corr)[c("Cell_type")],
+                                              show_rownames = F,
+                                              show_colnames = F,
+                                              clustering_method = "ward.D2",
+                                              cutree_cols = 2,
+                                              #cutree_rows =  4,
+                                              #cellheight = 10, 
+                                              fontsize = 8,
+                                              annotation_colors = annotation_colors["Cell_type"],
+                                              main = "fresh human_subsets_DEG: DNT_vs_rest",
+                                              name = "Z-Score") ) +
+                      ha
+pdf(file.path(figureDir, "DEG_heatmaps/fresh_DNT_vs_rest_subsets_DEG.pdf"), height = 9, width = 8)
+dnt_vs_rest_fresh_hm
+dev.off()
+
+
+dnt_vs_rest_culture_hm <- DEG_heatmap(eset_culture_corr[unique(dnt_vs_rest_DEGS$Culture$gene),], 
+                       colors = c("darkblue", "blue", "white", "red", "darkred"),
+                    heatmap_attributes = list(annotation_col = pData(eset_culture_corr)[c("Cell_type")],
+                                              show_rownames = T,
+                                              show_colnames = F,
+                                              clustering_method = "ward.D2",
+                                              cutree_cols = 2,
+                                              #cutree_rows =  4,
+                                              #cellheight = 10, 
+                                              fontsize = 8,
+                                              annotation_colors = annotation_colors["Cell_type"],
+                                              main = "culture human_subsets_DEG: DNT_vs_rest",
+                                              name = "Z-Score") ) 
+pdf(file.path(figureDir, "DEG_heatmaps/culture_DNT_vs_rest_subsets_DEG.pdf"), height = 9, width = 8)
+dnt_vs_rest_culture_hm
+dev.off()
+
+
+```
+

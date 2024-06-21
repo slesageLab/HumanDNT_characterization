@@ -1,0 +1,371 @@
+---
+title: "mixcr_human"
+author: "Adam Pelletier"
+date: "9/3/2021"
+output: html_document
+---
+
+```{r setup, message = FALSE, warning=FALSE}
+#### Load required packages for analysis
+## Some packages may require installation from Bioconductor : "https://bioconductor.org/install/" 
+suppressPackageStartupMessages(library(rstudioapi))
+suppressPackageStartupMessages(library(rmarkdown))
+suppressPackageStartupMessages(library(tidyverse))
+suppressPackageStartupMessages(library(RColorBrewer))
+suppressPackageStartupMessages(library(PCAtools))
+suppressPackageStartupMessages(library(dtplyr))
+suppressPackageStartupMessages(library(immunarch))
+suppressPackageStartupMessages(library(ggpubr))
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(getwd())
+```
+
+```{r read_files }
+
+
+
+mixcr_in <- sapply(c("TRA", "TRB", "TRG", "TRD"), simplify = F, USE.NAMES = T, function(x){
+  lS_raw <- list.files("input/mixcr", full.names = T, pattern = x)
+  dat <- repLoad(lS_raw)
+})
+
+
+### remove NKT and MAIT
+#### NKT express TRAV10 (Va24) and TRBV25 (Vb11) tcr
+#### MAIT express TRAV1-2-TRAJ33 (or TRAJ12/TRAJ20). Oligoclonal TCRb, but majority is TRBv20 and TRBV6
+
+nkt_clono <- list("TRA" =  list("V.name" = c("TRAV10"),
+                                "J.name" = c("TRAJ18")),
+                  "TRB" = list("V.name" = c("TRBV25"),
+                                "J.name" = c("*")))
+mait_clono <- list("TRA" =  list("V.name" = c("TRAV1-2"),
+                                 "J.name" = c("TRAJ33", "TRAJ12", "TRAJ20")),
+                   "TRB" =  list("V.name" = c("---"),
+                                 "J.name" = c("---")))
+
+
+mixcr_filt <- mixcr_in
+
+for(i in c("TRA", "TRB")){
+  for(j in names(mixcr_in[[i]]$data)){
+    #mixcr_filt[[i]]$data[[j]]  <- mixcr_in[[i]]$data[[j]] %>%
+    
+    
+    sampleid <- gsub(".sorted.*", "", gsub("Sample_", "", j))
+    conditionPID <- gsub(".*R200-", "", sampleid)
+    celltype <- gsub("-R200.*", "", sampleid)
+    PID <- gsub("-.*", "", conditionPID)
+
+    if(grepl("-C",  conditionPID)){
+      condition <- "Culture"
+    } else {
+      condition <- "Fresh"
+    }
+    if(i %in% c("TRA", "TRB")){
+          df  <- mixcr_in[[i]]$data[[j]] %>%  
+                                mutate(subset = ifelse(grepl(paste(nkt_clono[[i]]$V.name, "(*)", sep = "", collapse = "|"), `V.name`) &
+                                                       grepl(paste(nkt_clono[[i]]$J.name, "(*)", sep = "", collapse = "|"), `J.name`)  , "NKT", "Other")) %>%
+                                mutate(subset = ifelse(grepl(paste(mait_clono[[i]]$V.name, "(*)", sep = "", collapse = "|"), `V.name`) &
+                                                        grepl(paste(mait_clono[[i]]$J.name, "(*)", sep = "", collapse = "|"), `J.name`) , "MAIT", subset)) %>%                            
+                                mutate(V_temp = gsub("[*].*", "", `V.name`)) %>%
+                                mutate(J_temp = gsub("[*].*", "", `J.name`)) %>%
+                                mutate(clonotype = paste(V_temp, J_temp, sep = ":")) %>%
+                                mutate(clonotype_subset = ifelse(subset == "Other", "Other", clonotype)) %>%
+                                mutate(condition = condition,
+                                                     PID = PID,
+                                                     Cell_type = celltype) %>%
+                                mutate(subset = ifelse(subset == "Other", Cell_type, subset))
+      
+      mixcr_in[[i]]$data[[j]] <-  df 
+                                  
+      mixcr_filt[[i]]$data[[j]] <- df %>%
+                                  dplyr::filter(clonotype_subset == "Other")
+    } else {
+      df  <- mixcr_in[[i]]$data[[j]] %>%  
+                                mutate(subset = celltype) %>%
+                                mutate(V_temp = gsub("[*].*", "", `V.name`)) %>%
+                                mutate(J_temp = gsub("[*].*", "", `J.name`)) %>%
+                                mutate(clonotype = paste(V_temp, J_temp, sep = ":")) %>%
+                                mutate(clonotype_subset = clonotype) %>%
+                                mutate(condition = condition,
+                                                     PID = PID,
+                                                     Cell_type = celltype) 
+      
+       mixcr_filt[[i]]$data[[j]] <- df 
+    }
+    
+                                  
+   
+    
+  }
+  
+}
+
+contaminants_freq_df_subset <- sapply(c("TRA", "TRB"), simplify = F, USE.NAMES = T, function(x){
+    out <- do.call("rbind", mixcr_in[[x]]$data) %>%
+            dplyr::filter(Cell_type == "DNT") %>%
+            group_by(condition, PID) %>%
+            mutate(Proportion = Proportion / sum (Proportion)) %>%
+            group_by(subset, condition, PID) %>%
+            mutate(n = sum(Proportion)) %>%
+            dplyr::select(subset, PID, Cell_type, condition, n) %>%
+            unique() %>%
+            mutate(n = round(n, digits = 4))
+}) 
+
+contaminants_freq_df_clonotype_subset <- sapply(c("TRA", "TRB"), simplify = F, USE.NAMES = T, function(x){
+    out <- do.call("rbind", mixcr_in[[x]]$data) %>%
+            dplyr::filter(Cell_type == "DNT") %>%
+            group_by(condition, PID) %>%
+            mutate(Proportion = Proportion / sum (Proportion)) %>%
+            group_by(clonotype_subset, condition, PID) %>%
+            mutate(n = sum(Proportion)) %>%
+            dplyr::select(clonotype_subset, PID, Cell_type, condition, n) %>%
+            unique() %>%
+            mutate(n = round(n, digits = 4))
+}) 
+
+
+clonotype_empty_fill <- crossing(c("924", "937", "938"), 
+                                 c("TRA", "TRB"),
+                                 c("Culture", "Fresh"),
+                                 c("CD4", "CD8", "DNT", "gd")) %>%
+                        rename(PID = 1,
+                               chain = 2, 
+                               condition = 3,
+                               Cell_type = 4) %>%
+                        mutate(clonotype = NA,
+                               n = 1) %>%
+                        dplyr::select(clonotype, PID, Cell_type, condition, n) %>%
+                        mutate(combo = paste(PID, condition, Cell_type, sep = "!")) 
+
+
+
+contaminants_freq_df_clonotype <- sapply(c("TRA", "TRB"), simplify = F, USE.NAMES = T, function(x){
+  
+  
+    out <- do.call("rbind", mixcr_filt[[x]]$data) %>%
+            #dplyr::filter(Cell_type == "DNT") %>%
+            group_by(condition, PID, Cell_type) %>%
+            mutate(Proportion = Proportion / sum (Proportion)) %>%
+            group_by(clonotype, condition, PID, Cell_type) %>%
+            mutate(n = sum(Proportion)) %>%
+            dplyr::select(clonotype, PID, Cell_type, condition, n) %>%
+            unique() %>%
+            mutate(n = round(n, digits = 4)) %>%
+            mutate(combo = paste(PID, condition, Cell_type, sep = "!")) %>%
+            split(., f = .$Cell_type)
+}) 
+
+writexl::write_xlsx(contaminants_freq_df_clonotype, path = "output/data/purified_DNT_clonotypes.xlsx")
+
+
+piecharts_subset <- sapply(c("TRA", "TRB"), simplify = F, USE.NAMES = T, function(x){
+  df <- contaminants_freq_df_subset[[x]] %>%
+        mutate(n = n * 100) %>%
+        mutate(condition = as.factor(condition),
+               PID = as.factor(PID),
+               subset = as.factor(subset)) %>%
+        arrange(subset) %>%
+        group_by(condition, PID) %>%
+          mutate(csum = rev(cumsum(rev(n))), 
+                 pos = n/2 + lead(csum, 1),
+                 pos = if_else(is.na(pos), n/2, pos)) %>%
+          ungroup()
+
+  p <- ggplot(df, aes(x = "", y = n, fill = subset)) +
+      geom_col(color = "black") +
+      coord_polar(theta = "y") + 
+      geom_label_repel(aes(y = pos, label = paste0(n, "%")),
+                   size = 3.5, nudge_x = 1, show.legend = FALSE) +
+      theme_void() +
+      ggtitle(x) +
+      guides(fill = guide_legend(title = "Subset")) +
+      facet_grid(PID ~  condition)
+  
+})
+
+pdf("output/figures/repertoire/DNT_contaminant_piechart.pdf")
+piecharts_subset
+dev.off()
+
+
+piecharts_clonotypes_subset <- sapply(c("TRA", "TRB"), simplify = F, USE.NAMES = T, function(x){
+
+  df <- contaminants_freq_df_clonotype_subset[[x]]  %>%
+        mutate(n = n * 100) %>%
+        mutate(condition = as.factor(condition),
+               PID = as.factor(PID),
+               clonotype_subset = as.factor(clonotype_subset)) %>%
+        arrange(clonotype_subset) %>%
+        group_by(condition, PID) %>%
+          mutate(csum = rev(cumsum(rev(n))), 
+                 pos = n/2 + lead(csum, 1),
+                 pos = if_else(is.na(pos), n/2, pos)) %>%
+          ungroup()
+  
+  p <- ggplot(df, aes(x = "", y = n, fill = clonotype_subset))+
+      geom_col(color = "black") +
+      coord_polar(theta = "y") + 
+      geom_label_repel(aes(y = pos, label = paste0(n, "%")),
+                   size = 3.5, nudge_x = 1, show.legend = FALSE) +
+      theme_void() +
+      ggtitle(x) +
+      guides(fill = guide_legend(title = "Clonotype")) +
+      facet_grid(PID ~  condition)
+  
+})
+
+pdf("output/figures/repertoire/DNT_subset_associated_clonotypes_piechart.pdf")
+piecharts_clonotypes_subset
+dev.off()
+
+
+chains <- c("TRA", "TRB")
+Cell_type <- names(contaminants_freq_df_clonotype$TRA)
+chain_combo <- crossing(chains,Cell_type) %>%
+                mutate(combo = paste(chains, Cell_type, sep = "::"))
+         
+         
+
+
+piecharts_clonotypes <- sapply(chains , simplify = F, USE.NAMES = T, function(x){
+  # chain <- chain_combo[chain_combo$combo == x,]$chains
+  # celltype <- chain_combo[chain_combo$combo == x,]$Cell_type
+  
+  df <- do.call("rbind", contaminants_freq_df_clonotype[[x]] )
+  
+  empty_fill_filt <- clonotype_empty_fill[clonotype_empty_fill$combo %in% setdiff(clonotype_empty_fill$combo, df$combo ),]
+  #return(empty_fill_filt)
+  df <- bind_rows(df, empty_fill_filt) %>%
+        unique()
+  #return(df)
+  p <- ggplot(df, aes(x = "", y = n, fill = clonotype))+
+    geom_col(color = "black", linewidth = 0.25) +
+    coord_polar(theta = "y") + 
+    theme_void() +
+    ggtitle(x) +
+    theme(legend.position = "none") +
+    facet_grid(PID ~  condition + Cell_type)
+    
+  
+  return(p)
+  
+})
+
+#pdf("output/figures/repertoire/DNT(pure)_clonotypes_piechart.pdf", width = 9, height = 5)
+pdf("output/figures/repertoire/pure_clonotypes_piechart.pdf", width = 9, height = 5)
+piecharts_clonotypes
+dev.off()
+
+
+
+
+methods <- c("inv.simp", "div")
+
+
+
+
+mixcr_diversity <- sapply(methods, simplify = F, USE.NAMES = T, function(y){
+  out <- sapply(names(mixcr_filt), simplify = F, USE.NAMES = T, function(x){
+    diver <- repDiversity(mixcr_filt[[x]]$data, .method = y)
+
+    diversity_analysis <- diver %>%
+                        as.data.frame() %>%
+                        filter(is.finite(Value)) %>%
+                        mutate(Sample = gsub(".sorted_mixcr.*", "", gsub("Sample_", "", Sample))) %>%
+                        inner_join(., pData_annot %>% rownames_to_column("Sample"),
+                         by = "Sample") %>%
+                        mutate(metric = y) %>%
+                        mutate(chain = x) #%>%
+                        #dplyr::filter(Culture == "Fresh")
+
+    return(diversity_analysis)
+  })
+})
+
+# 
+# lapply(names(mixcr_filt), function(x){
+#   out <- lapply(names(mixcr_filt[[x]]), function(y){
+#     df <- 
+#   })
+#   
+# })
+
+mixcr_diversity_stats <- do.call("rbind", sapply(names(mixcr_diversity), simplify = F, USE.NAMES = T, function(y){
+  out <- do.call("rbind", sapply(names(mixcr_diversity[[y]][c(1:2)]), simplify = F, USE.NAMES = T, function(x){
+    df <- mixcr_diversity[[y]][[x]] %>%
+          mutate(Donor = gsub("-.*", "", gsub(".*R200-", "", Sample))) %>%
+          dplyr::select(-condition,-Sample) %>%
+          spread(Cell_type, Value) %>%
+          gather(Cell_type, Value, -Culture, -metric, -chain, -Donor ) %>%
+          dplyr::filter(Cell_type %in% c("CD8", "DNT")) %>%
+          group_by(Culture) %>%
+          wilcox_test(formula = Value ~ Cell_type, paired = T) %>%
+          mutate(chain = x) %>%
+          mutate(method = ifelse(y == "div", "Shannon", "Inverse Simpson"))
+    # anova <- rstatix::get_anova_table(rstatix::anova_test(df ,dv = Value, wid = Donor, between = Cell_type))
+    # paired_t <- pairwise_t_test(df, formula = Value ~ Cell_type, paired = T)
+  }))
+}))
+write_tsv(mixcr_diversity_stats,"output/data/mixcr_cd8_vs_DNT_diversity_stats.tsv")
+  
+diversity_plots <- sapply(names(mixcr_diversity), simplify = F, USE.NAMES = T, function(y){
+  out <- sapply(names(mixcr_diversity[[y]][c(1:2)]), simplify = F, USE.NAMES = T, function(x){
+    df <- mixcr_diversity[[y]][[x]] 
+
+    p <- ggplot(df, aes(x = Cell_type, y = Value, color = Cell_type)) +
+        geom_boxplot() +
+        theme_classic() +
+        ggtitle(x) +
+        xlab("Cell Type") +
+        scale_color_manual(values = annotation_colors$Cell_type)
+        
+    if(y == "inv.simp"){
+      p <- p + ylab("Inverse Simpson Index") 
+    } else {
+      p <- p + ylab("Shannon Index") 
+    }
+  })
+  p2 <- ggarrange(plotlist = out, ncol = 2, nrow = 1, common.legend = T )    
+})
+
+pdf("output/figures/repertoire/CDR3_diversity_shannon.pdf", height = 4, width = 6)
+diversity_plots$div
+dev.off()
+
+pdf("output/figures/repertoire/CDR3_diversity_inverse_simpson.pdf", height = 4, width = 6)
+diversity_plots$inv.simp
+dev.off()
+
+diversity_plots_NOGD <- sapply(names(mixcr_diversity), simplify = F, USE.NAMES = T, function(y){
+  out <- sapply(names(mixcr_diversity[[y]][c(1:2)]), simplify = F, USE.NAMES = T, function(x){
+    df <- mixcr_diversity[[y]][[x]] %>%
+            dplyr::filter(Cell_type != "gd") 
+    p <- ggplot(df, aes(x = Cell_type, y = Value, color = Cell_type)) +
+        geom_boxplot() +
+        theme_classic() +
+        ggtitle(x) +
+        xlab("Cell Type") +
+        scale_color_manual(values = annotation_colors$Cell_type)
+        
+    if(y == "inv.simp"){
+      p <- p + ylab("Inverse Simpson Index") 
+    } else {
+      p <- p + ylab("Shannon Index") 
+    }
+  })
+  p2 <- ggarrange(plotlist = out, ncol = 2, nrow = 1, common.legend = T )    
+})
+
+pdf("output/figures/repertoire/CDR3_diversity_shannon_nogd.pdf", height = 4, width = 6)
+diversity_plots_NOGD$div
+dev.off()
+
+pdf("output/figures/repertoire/CDR3_diversity_inverse_simpson_nogd.pdf", height = 4, width = 6)
+diversity_plots_NOGD$inv.simp
+dev.off()
+
+
+
+```
